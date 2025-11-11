@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>AeroFL – Global Flight Tracker</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
+<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster/dist/MarkerCluster.css"/>
+<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster/dist/MarkerCluster.Default.css"/>
+<style>
+html, body { margin:0; padding:0; height:100%; font-family:Arial,sans-serif; }
+body { display:flex; flex-direction:column; }
+#map { flex:1 1 auto; width:100%; min-height:300px; }
+
+/* Dashboard */
+#dashboard {
+  position: fixed; bottom:0; left:0; width:95%; max-height:60vh;
+  transform: translateY(80%); transition: transform 0.3s ease;
+  background: rgba(255,255,255,0.95); border-top-left-radius:10px;
+  border-top-right-radius:10px; box-shadow:0 -2px 8px rgba(0,0,0,0.3);
+  z-index:10001; overflow-y:auto; -webkit-overflow-scrolling:touch; padding:8px;
+}
+#dashboard.expanded { transform: translateY(0); }
+#dashboard-summary { display:flex; justify-content:space-around; font-size:12px; margin-bottom:5px; }
+#dashboard.expanded #dashboard-summary { display:none; }
+#dashboard-full h3 { margin:10px 0 5px 0; font-size:16px; }
+#dashboard-full table { width:100%; font-size:13px; border-collapse:collapse; margin-bottom:10px; }
+#dashboard-full table th, #dashboard-full table td { text-align:left; padding:2px 4px; border-bottom:1px solid #ddd; }
+#dashboard-full button { width:100%; margin-top:5px; padding:5px; font-size:14px; border-radius:4px; background:#007bff; color:white; border:none; cursor:pointer; }
+#dashboard-full label { display:block; margin-bottom:5px; font-size:14px; }
+#collisionTable tr.highRisk { background: #ffcccc; }
+#collisionTable tr.mediumRisk { background: #fff3cc; }
+#collisionTable tr.lowRisk { background: #ccffcc; }
+#collisionTable td { padding:2px 4px; font-size:12px; }
+
+/* Footer */
+footer { text-align:center; padding:8px; font-size:13px; background:rgba(255,255,255,0.95); border-top:1px solid #ccc; }
+
+/* Desktop layout */
+@media (min-width:768px){
+  body { flex-direction:row; }
+  #map { flex:1; height:100vh; }
+  #dashboard { position:relative; width:300px; height:100vh; transform:none !important; border-left:1px solid #ccc; border-radius:0; }
+  #dashboard-toggle { display:none; }
+}
+#dashboard-toggle { position:fixed; bottom:15px; right:15px; z-index:10002; background:#007bff; color:white; padding:8px 12px; border-radius:5px; font-size:14px; cursor:pointer; }
+</style>
+</head>
+<body>
+
+<div id="map"></div>
+
+<div id="dashboard">
+  <div id="dashboard-summary">
+    <div>Total: <span id="totalFlights">0</span></div>
+    <div>Low: <span id="lowFlights">0</span></div>
+    <div>Med: <span id="mediumFlights">0</span></div>
+    <div>High: <span id="highFlights">0</span></div>
+    <div>Collisions: <span id="collisionCount">0</span></div>
+  </div>
+
+  <div id="dashboard-full">
+    <div id="filters">
+      <label>Min Altitude (m): <input type="number" id="minAlt" value="0"></label>
+      <label>Max Altitude (m): <input type="number" id="maxAlt" value="20000"></label>
+      <label>Min Speed (km/h): <input type="number" id="minSpeed" value="0"></label>
+      <label>Max Speed (km/h): <input type="number" id="maxSpeed" value="1200"></label>
+      <label>Airline ICAO prefix: <input type="text" id="airlineFilter" placeholder="e.g. AI"></label>
+      <button id="applyFilters">Apply Filters</button>
+    </div>
+
+    <h3>Flight Stats – AeroFL</h3>
+    <p>Total Flights: <span id="totalFlightsFull">0</span></p>
+    <p>Low Altitude (&lt;5km): <span id="lowFlightsFull">0</span></p>
+    <p>Medium Altitude (5-12km): <span id="mediumFlightsFull">0</span></p>
+    <p>High Altitude (&gt;12km): <span id="highFlightsFull">0</span></p>
+    <p>Potential Collisions: <span id="collisionCountFull">0</span></p>
+
+    <h3>Top Airlines – AeroFL</h3>
+    <table id="airlineTable">
+      <thead><tr><th>Airline</th><th>Flights</th></tr></thead>
+      <tbody></tbody>
+    </table>
+
+    <h3>Top 5 Collision Alerts</h3>
+    <table id="collisionTable">
+      <thead>
+        <tr>
+          <th>Plane 1</th>
+          <th>Plane 2</th>
+          <th>H Dist (km)</th>
+          <th>V Dist (m)</th>
+          <th>Risk (%)</th>
+          <th>TTC</th>
+          <th>Map</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</div>
+
+<button id="dashboard-toggle">Dashboard</button>
+
+<footer>© Manik Roy 2025. All Rights Reserved.</footer>
+
+<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet.markercluster/dist/leaflet.markercluster.js"></script>
+<script src="https://unpkg.com/leaflet.heat/dist/leaflet-heat.js"></script>
+<script src="https://unpkg.com/leaflet-rotatedmarker/leaflet.rotatedMarker.js"></script>
+
+<script>
+// --- Mobile Detection ---
+const isMobile = window.innerWidth < 768;
+
+// --- Map ---
+const dayTiles = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'&copy;OSM'});
+const nightTiles = L.tileLayer('https://tiles.stadiamaps.com/tiles/alidade_smooth_dark/{z}/{x}/{y}{r}.png',{attribution:'&copy;StadiaMaps'});
+const map = L.map('map',{tap:isMobile}).setView([20,0],2);
+const hour = new Date().getHours(); (hour>=18||hour<6)?nightTiles.addTo(map):dayTiles.addTo(map);
+const carto = L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png');
+const toner = L.tileLayer('https://stamen-tiles.a.ssl.fastly.net/toner-lite/{z}/{x}/{y}.png');
+const satellite = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}');
+L.control.layers({"Day/Night": (hour>=18||hour<6)?nightTiles:dayTiles, "Carto": carto, "Toner": toner, "Satellite": satellite}, null, {collapsed:false}).addTo(map);
+
+// --- Layers ---
+let heatLayer = L.heatLayer([], {radius:isMobile?12:20, blur:10, max:1, minOpacity:0.3}).addTo(map);
+const clusterGroup = L.markerClusterGroup(); map.addLayer(clusterGroup);
+const trajectoryLayer = L.layerGroup().addTo(map);
+
+// --- Icons ---
+const planeIcon = L.icon({iconUrl:'https://cdn-icons-png.flaticon.com/512/684/684908.png', iconSize:[30,30], iconAnchor:[15,15]});
+
+// --- Flight Data ---
+const flightsMap = {}, planeTrails = {}, trailPolylines = {};
+const MAX_TRAIL_POINTS = 30;
+const PREDICTION_TIME_SEC = 120;
+let collisionAlerts = [];
+const collisionLayer = L.layerGroup().addTo(map);
+const MIN_HORIZONTAL_DIST_KM = 10, MIN_VERTICAL_DIST_M = 300;
+
+// --- Utility Functions ---
+function getAirlineColor(code){ let hash=0; for(let i=0;i<code.length;i++) hash=code.charCodeAt(i)+((hash<<5)-hash); const c=(hash & 0x00FFFFFF).toString(16).toUpperCase(); return "#"+"00000".substring(0,6-c.length)+c; }
+function haversine(lat1,lon1,lat2,lon2){ const R=6371; const dLat=(lat2-lat1)*Math.PI/180; const dLon=(lon2-lon1)*Math.PI/180; const a=Math.sin(dLat/2)**2+Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLon/2)**2; const c=2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a)); return R*c; }
+function applyFilters(f){ const minAlt=parseFloat(document.getElementById('minAlt').value)||0; const maxAlt=parseFloat(document.getElementById('maxAlt').value)||20000; const minSpeed=parseFloat(document.getElementById('minSpeed').value)||0; const maxSpeed=parseFloat(document.getElementById('maxSpeed').value)||1200; const airlinePrefix=document.getElementById('airlineFilter').value.toUpperCase(); const alt=f[7]||0; const speed=f[9]?f[9]*3.6:0; const callsign=f[1]?f[1].trim():""; if(alt<minAlt||alt>maxAlt) return false; if(speed<minSpeed||speed>maxSpeed) return false; if(airlinePrefix && callsign && !callsign.startsWith(airlinePrefix)) return false; return true; }
+function formatTime(sec){ const m=Math.floor(sec/60), s=sec%60; return `${m}m ${s}s`; }
+function movePlane(marker, newLatLng, duration=15000){
+  if(marker.animationFrame) cancelAnimationFrame(marker.animationFrame);
+  const start=marker.getLatLng(), startTime=performance.now();
+  function animate(now){
+    const elapsed=now-startTime;
+    const t=Math.min(1,elapsed/duration);
+    const nextLat=start.lat+(newLatLng[0]-start.lat)*t;
+    const nextLng=start.lng+(newLatLng[1]-start.lng)*t;
+    marker.setLatLng([nextLat,nextLng]);
+    const heading=Math.atan2(newLatLng[1]-start.lng,newLatLng[0]-start.lat)*180/Math.PI;
+    marker.setRotationAngle(heading);
+    if(t<1) marker.animationFrame=requestAnimationFrame(animate);
+  }
+  marker.animationFrame=requestAnimationFrame(animate);
+}
+function predictPosition(flight, seconds=PREDICTION_TIME_SEC){
+    const lat = flight[6], lon = flight[5];
+    const alt = flight[7]||0;
+    const velocity = flight[9]?flight[9]*3.6:0;
+    const heading = flight[10]!==null?flight[10]:0;
+    const verticalRate = flight[11]||0;
+    const distance = velocity*seconds/3600;
+    const rad = heading*Math.PI/180;
+    const deltaLat = distance*Math.cos(rad)/111;
+    const deltaLon = distance*Math.sin(rad)/(111*Math.cos(lat*Math.PI/180));
+    return {lat: lat+deltaLat, lon: lon+deltaLon, alt: alt+verticalRate*seconds};
+}
+function calculateRisk(horizontalDistKM, verticalDistM){
+  if(horizontalDistKM>MIN_HORIZONTAL_DIST_KM || verticalDistM>MIN_VERTICAL_DIST_M) return 0;
+  const hFactor=1-(horizontalDistKM/MIN_HORIZONTAL_DIST_KM);
+  const vFactor=1-(verticalDistM/MIN_VERTICAL_DIST_M);
+  return Math.round(hFactor*vFactor*100);
+}
+function predictTTC(f1,f2,maxSeconds=300,step=1){
+  for(let t=0;t<=maxSeconds;t+=step){
+    const p1=predictPosition(f1,t), p2=predictPosition(f2,t);
+    const h=haversine(p1.lat,p1.lon,p2.lat,p2.lon);
+    const v=Math.abs((p1.alt||0)-(p2.alt||0));
+    if(h<MIN_HORIZONTAL_DIST_KM && v<MIN_VERTICAL_DIST_M) return t;
+  }
+  return null;
+}
+
+// --- Check Collisions ---
+function checkCollisions(flights){
+  collisionAlerts=[];
+  const GRID_SIZE_KM=50;
+  const grid={};
+  function getGridKey(lat,lon){ const latKey=Math.floor(lat*111/GRID_SIZE_KM); const lonKey=Math.floor(lon*111/GRID_SIZE_KM); return `${latKey}_${lonKey}`; }
+  flights.forEach(f=>{ if(!f[5]||!f[6]) return; const key=getGridKey(f[6],f[5]); if(!grid[key]) grid[key]=[]; grid[key].push(f); });
+  const neighborOffsets=[-1,0,1];
+  Object.entries(grid).forEach(([key,cellFlights])=>{
+    const [latKey,lonKey]=key.split('_').map(Number);
+    neighborOffsets.forEach(dx=>{ neighborOffsets.forEach(dy=>{
+      const neighborKey=`${latKey+dx}_${lonKey+dy}`; const neighborFlights=grid[neighborKey]; if(!neighborFlights) return;
+      for(let i=0;i<cellFlights.length;i++){
+        const f1=cellFlights[i]; const c1=(f1[1]||"").trim();
+        for(let j=0;j<neighborFlights.length;j++){
+          const f2=neighborFlights[j]; const c2=(f2[1]||"").trim(); if(c1===c2) continue;
+          const h=haversine(f1[6],f1[5],f2[6],f2[5]);
+          const v=Math.abs((f1[7]||0)-(f2[7]||0));
+          const risk=calculateRisk(h,v);
+          const ttc=predictTTC(f1,f2);
+          if(risk>0) collisionAlerts.push({plane1:c1,plane2:c2,horizontalDist:h,verticalDist:v,risk,ttc,lat:(f1[6]+f2[6])/2,lon:(f1[5]+f2[5])/2});
+        }
+      }
+    });});
+  });
+}
+
+// --- Render Top 5 Collisions ---
+function renderCollisions(){
+  collisionLayer.clearLayers();
+  const tbody = document.querySelector("#collisionTable tbody");
+  tbody.innerHTML = "";
+
+  const topCollisions = collisionAlerts
+    .sort((a,b)=> b.risk - a.risk || (a.ttc||Infinity) - (b.ttc||Infinity))
+    .slice(0,5);
+
+  topCollisions.forEach(alert=>{
+    let color='green';
+    if(alert.risk>60) color='red';
+    else if(alert.risk>30) color='yellow';
+    if(alert.ttc!==null && alert.ttc<60) color='orange';
+
+    const marker = L.circleMarker([alert.lat,alert.lon],{radius:8,color:color,fillColor:color,fillOpacity:0.7})
+      .bindPopup(`<b>Collision Alert</b><br>${alert.plane1}&${alert.plane2}<br>H: ${alert.horizontalDist.toFixed(2)} km<br>V: ${alert.verticalDist.toFixed(0)} m<br>Risk: ${alert.risk}%<br>TTC: ${alert.ttc!==null?formatTime(alert.ttc):'—'}`);
+    collisionLayer.addLayer(marker);
+
+    const row = document.createElement("tr");
+    row.innerHTML=`<td>${alert.plane1}</td><td>${alert.plane2}</td><td>${alert.horizontalDist.toFixed(2)}</td><td>${alert.verticalDist.toFixed(0)}</td><td>${alert.risk}</td><td>${alert.ttc!==null?formatTime(alert.ttc):'—'}</td><td><button class="focusCollision">Focus</button></td>`;
+    tbody.appendChild(row);
+    row.querySelector(".focusCollision").addEventListener("click",()=>{ map.setView([alert.lat,alert.lon],7); marker.openPopup(); });
+  });
+
+  document.getElementById('collisionCount').textContent = topCollisions.length;
+  document.getElementById('collisionCountFull').textContent = topCollisions.length;
+}
+
+// --- Fetch Flights ---
+async function fetchFlights(){
+  try{
+    const res=await fetch('https://opensky-network.org/api/states/all'); const data=await res.json(); const flights=data.states||[];
+    heatLayer.setLatLngs([]); trajectoryLayer.clearLayers();
+    const heatPoints=[]; let low=0,medium=0,high=0; const airlineCount={};
+    const visibleFlights=flights.filter(f=>f[5]&&f[6]&&applyFilters(f));
+    visibleFlights.forEach(f=>{
+      const lat=f[6], lon=f[5], alt=f[7]||0, velocity=f[9]?f[9]*3.6:0, callsign=f[1]?f[1].trim():"N/A";
+      const heading=f[10]!==null?f[10]:0, verticalRate=f[11]||0, originCountry=f[2]||"Unknown";
+      heatPoints.push([lat,lon,1]);
+      const airlineCode=callsign.substring(0,2); const trailColor=getAirlineColor(airlineCode);
+      if(!planeTrails[callsign]) planeTrails[callsign]=[];
+      planeTrails[callsign].push([lat,lon]); if(planeTrails[callsign].length>MAX_TRAIL_POINTS) planeTrails[callsign].shift();
+      if(!trailPolylines[callsign]) trailPolylines[callsign]=L.polyline(planeTrails[callsign],{color:trailColor,weight:2,opacity:0.8,dashArray:"5,5"}).addTo(map);
+      else trailPolylines[callsign].setLatLngs(planeTrails[callsign]);
+
+      let marker=flightsMap[callsign];
+      if(marker) movePlane(marker,[lat,lon],15000);
+      else{
+        marker=L.marker([lat,lon],{icon:planeIcon,rotationAngle:heading,rotationOrigin:'center center'})
+          .on('click touch',()=>{ marker.bindPopup(`<b>Callsign:</b>${callsign}<br><b>Altitude:</b>${alt.toFixed(0)} m<br><b>Speed:</b>${velocity.toFixed(0)} km/h<br><b>Heading:</b>${heading}&deg;<br><b>Vertical Rate:</b>${verticalRate} m/s<br><b>Origin:</b>${originCountry}<br><b>Airline:</b>${airlineCode}`).openPopup(); });
+        flightsMap[callsign]=marker; clusterGroup.addLayer(marker);
+      }
+
+      if(alt<5000) low++; else if(alt<12000) medium++; else high++;
+      airlineCount[airlineCode]=(airlineCount[airlineCode]||0)+1;
+    });
+
+    heatLayer.setLatLngs(heatPoints);
+
+    checkCollisions(visibleFlights);
+    renderCollisions();
+
+    document.getElementById('totalFlights').textContent=visibleFlights.length;
+    document.getElementById('lowFlights').textContent=low;
+    document.getElementById('mediumFlights').textContent=medium;
+    document.getElementById('highFlights').textContent=high;
+    document.getElementById('totalFlightsFull').textContent=visibleFlights.length;
+    document.getElementById('lowFlightsFull').textContent=low;
+    document.getElementById('mediumFlightsFull').textContent=medium;
+    document.getElementById('highFlightsFull').textContent=high;
+
+    const airlineTableBody=document.querySelector("#airlineTable tbody");
+    airlineTableBody.innerHTML="";
+    Object.entries(airlineCount).sort((a,b)=>b[1]-a[1]).slice(0,5).forEach(([a,c])=>{ airlineTableBody.innerHTML+=`<tr><td>${a}</td><td>${c}</td></tr>`; });
+
+    if(!isMobile) map.invalidateSize();
+  }catch(err){console.error(err);}
+}
+
+fetchFlights(); setInterval(fetchFlights,15000);
+
+// --- Filters ---
+document.getElementById('applyFilters').addEventListener('click',()=>{ fetchFlights(); });
+
+// --- Dashboard toggle ---
+if(isMobile){
+  const dash=document.getElementById('dashboard'); const toggle=document.getElementById('dashboard-toggle');
+  toggle.addEventListener('click',()=>{ dash.classList.toggle('expanded'); });
+  map.on('click',()=>{ dash.classList.remove('expanded'); });
+}
+</script>
+</body>
+</html>
